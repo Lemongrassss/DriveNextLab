@@ -1,5 +1,6 @@
 package com.example.drivenext.presentation.auth
 
+import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
@@ -13,6 +14,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import com.example.drivenext.data.auth.LocalAccountRepository
 import com.example.drivenext.domain.auth.AuthFormValidator
+import com.example.drivenext.presentation.main.MainActivity
 import java.io.File
 
 class AuthActivity : AppCompatActivity() {
@@ -72,6 +74,16 @@ class AuthActivity : AppCompatActivity() {
     }
 
     private fun render() {
+        if (screen == HOME) {
+            if (account.hasSession()) {
+                startActivity(Intent(this, MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+                finish()
+                return
+            }
+            screen = LOGIN
+        }
+
         @Suppress("DEPRECATION")
         window.statusBarColor = Color.WHITE
         @Suppress("DEPRECATION")
@@ -90,10 +102,6 @@ class AuthActivity : AppCompatActivity() {
             REGISTER_TWO -> RegistrationScreens(ui, values).second { advance(AuthFormValidator.secondStep(values), REGISTER_THREE) }
             REGISTER_THREE -> RegistrationScreens(ui, values).third(::completeRegistration, ::choosePhoto)
             SUCCESS -> CompletionScreens(ui).success { show(HOME) }
-            else -> CompletionScreens(ui).home {
-                account.signOut()
-                finish()
-            }
         }
     }
 
@@ -108,7 +116,10 @@ class AuthActivity : AppCompatActivity() {
 
     private fun completeRegistration() {
         AuthFormValidator.thirdStep(values)?.let { message(it); return }
-        account.register(values["email"].orEmpty(), values["password"].orEmpty())
+        val name = listOfNotNull(values["first_name"], values["surname"]).joinToString(" ")
+        account.register(values["email"].orEmpty(), values["password"].orEmpty(),
+            name, values["gender"].orEmpty())
+        values["avatar"]?.let { account.saveAvatar(Uri.parse(it)) }
         show(SUCCESS)
     }
 

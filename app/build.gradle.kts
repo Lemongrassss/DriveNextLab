@@ -13,6 +13,9 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
+        val serverUrl = providers.gradleProperty("DRIVENEXT_SERVER_URL")
+            .getOrElse("http://10.0.2.2:8000")
+        buildConfigField("String", "SERVER_URL", "\"$serverUrl\"")
     }
 
     buildTypes {
@@ -27,7 +30,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { viewBinding = true }
+    buildFeatures {
+        viewBinding = true
+        buildConfig = true
+    }
 }
 
 dependencies {
@@ -38,5 +44,6 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.9.1")
     implementation("androidx.constraintlayout:constraintlayout:2.2.1")
     implementation("androidx.viewpager2:viewpager2:1.1.0")
+    implementation("androidx.recyclerview:recyclerview:1.3.1")
     implementation("androidx.core:core-splashscreen:1.0.1")
 }
