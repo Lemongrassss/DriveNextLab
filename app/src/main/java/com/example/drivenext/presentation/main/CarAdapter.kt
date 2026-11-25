@@ -29,6 +29,7 @@ internal class CarAdapter(private val open: (Car, Boolean) -> Unit) :
         private val price = ui.label("", 14f, bold = true)
         private val transmission = ui.label("", 12f, ui.muted)
         private val fuel = ui.label("", 12f, ui.muted)
+        private val photo = ui.icon(R.drawable.lab3_mercedes).apply { contentDescription = "Автомобиль" }
         private lateinit var car: Car
 
         init {
@@ -39,9 +40,7 @@ internal class CarAdapter(private val open: (Car, Boolean) -> Unit) :
 
                 val top = FrameLayout(card.context)
                 card.addView(top, LinearLayout.LayoutParams(-1, 0, 1f))
-                top.addView(icon(R.drawable.lab3_mercedes).apply {
-                    contentDescription = "Автомобиль"
-                }, FrameLayout.LayoutParams(dp(174), dp(71), Gravity.END or Gravity.TOP).apply {
+                top.addView(photo, FrameLayout.LayoutParams(dp(174), dp(71), Gravity.END or Gravity.TOP).apply {
                     topMargin = dp(36)
                 })
                 val info = column()
@@ -71,6 +70,7 @@ internal class CarAdapter(private val open: (Car, Boolean) -> Unit) :
 
         fun bind(value: Car) {
             car = value
+            photo.setImageResource(carImage(car))
             model.text = car.model
             brand.text = car.brand
             price.text = "${car.price}₽"

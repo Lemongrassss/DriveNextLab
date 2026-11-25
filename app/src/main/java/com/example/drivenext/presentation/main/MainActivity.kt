@@ -1,23 +1,19 @@
 package com.example.drivenext.presentation.main
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.view.inputmethod.InputMethodManager
-import android.widget.EditText
-import android.widget.FrameLayout
-import android.widget.ImageView
-import android.widget.LinearLayout
-import android.widget.ProgressBar
-import android.widget.ScrollView
-import android.widget.Toast
-import androidx.activity.OnBackPressedCallback
+import android.widget.*
+import androidx.activity.addCallback
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SearchView
+import androidx.core.os.bundleOf
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -25,49 +21,51 @@ import androidx.recyclerview.widget.RecyclerView
 import com.example.drivenext.R
 import com.example.drivenext.data.auth.AccountRepository
 import com.example.drivenext.data.booking.BookingRepository
+import com.example.drivenext.data.catalog.CarRepository
+import com.example.drivenext.data.cloud.Supabase
 import com.example.drivenext.domain.catalog.Car
 import com.example.drivenext.presentation.auth.AuthActivity
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.LocalDate
 
 class MainActivity : AppCompatActivity() {
-    private enum class Page { HOME, RESULTS, FAVORITES, SETTINGS, PROFILE, BOOKINGS, ADD_CAR, DETAILS, RENT }
+    private enum class Page {
+        HOME, RESULTS, FAVORITES, SETTINGS, PROFILE, BOOKINGS, BOOKING_DETAIL, ADD_CAR, DETAILS, RENT, SUCCESS
+    }
 
     private val model by viewModels<CatalogViewModel>()
     private val account by lazy { AccountRepository(applicationContext) }
-    private val preferences by lazy { getSharedPreferences("catalog", MODE_PRIVATE) }
     private val ui by lazy { MainUi(this) }
     private val profile by lazy { ProfileScreen(ui, account) }
     private val bookings by lazy { BookingRepository(account) }
     private val bookingScreen by lazy { BookingScreen(this, ui) }
-    private var page = Page.HOME
+    private val detailsScreen by lazy { CarDetailsScreen(this, ui) }
+    private val cars = CarRepository()
+    private val adapter = CarAdapter(::openCar)
+    private val preferences by lazy { getSharedPreferences("catalog", MODE_PRIVATE) }
+    private val favoritePrefs by lazy { getSharedPreferences("favorites", MODE_PRIVATE) }
+    private val favoriteKey by lazy { "${Supabase.url}/${account.id}" }
+    private val favorites get() = favoritePrefs.getStringSet(favoriteKey, emptySet()).orEmpty()
+    private var route = listOf(Page.HOME)
+    private val page get() = route.last()
     private var query = ""
+    private var car: Car? = null
+    private var dates = BookingScreen.Dates()
+    private var bookingId = 0L
     private var typing: Job? = null
-    private var carPageFrom = Page.HOME
-    private var selectedCar: Car? = null
-    private var rentalDates = BookingScreen.Dates()
+    private var pageRequest: Job? = null
+    private var avatarRequest: Job? = null
+    private var avatarLoaded = false
+    private var bookingPending = false
     private lateinit var body: FrameLayout
     private lateinit var navigation: LinearLayout
     private var catalog: FrameLayout? = null
-    private var list: RecyclerView? = null
-    private var message: LinearLayout? = null
-    private val adapter = CarAdapter(::openCar)
-    private var avatarLoaded = false
-    private var avatarRequest: Job? = null
-    private var bookingPending = false
+
     private val avatarPicker = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null && page == Page.PROFILE) {
-            avatarRequest?.cancel()
-            avatarRequest = cloud("Не удалось загрузить фото.") {
-                account.saveAvatar(uri)
-                profile.photo = account.avatar()
-                avatarLoaded = true
-                if (page == Page.PROFILE || page == Page.SETTINGS) render()
-            }
-        }
+        if (uri != null && page == Page.PROFILE) loadAvatar(uri)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -77,21 +75,18 @@ class MainActivity : AppCompatActivity() {
             return
         }
         query = savedInstanceState?.getString("draft") ?: preferences.getString("query", "").orEmpty()
-        WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = true
-        page = savedInstanceState?.getString("page")?.let(Page::valueOf)
-            ?: if (query.isBlank()) Page.HOME else Page.RESULTS
-        carPageFrom = savedInstanceState?.getString("car_page_from")?.let(Page::valueOf) ?: Page.HOME
-        selectedCar = savedInstanceState?.getBundle("selected_car")?.let {
-            Car(it.getInt("id"), it.getString("model").orEmpty(), it.getString("brand").orEmpty(),
+        route = savedInstanceState?.getStringArrayList("route")?.map(Page::valueOf)
+            ?: if (query.isBlank()) listOf(Page.HOME) else listOf(Page.HOME, Page.RESULTS)
+        bookingId = savedInstanceState?.getLong("booking_id") ?: 0
+        savedInstanceState?.getBundle("selected_car")?.let {
+            car = Car(it.getInt("id"), it.getString("model").orEmpty(), it.getString("brand").orEmpty(),
                 it.getInt("price"), it.getString("transmission").orEmpty(), it.getString("fuel").orEmpty())
         }
         savedInstanceState?.getString("rent_start")?.let { start ->
             val end = savedInstanceState.getString("rent_end") ?: return@let
-            rentalDates = BookingScreen.Dates(LocalDate.parse(start), LocalDate.parse(end))
+            dates = BookingScreen.Dates(LocalDate.parse(start), LocalDate.parse(end))
         }
-        if ((page == Page.DETAILS || page == Page.RENT) && selectedCar == null) {
-            page = if (query.isBlank()) Page.HOME else Page.RESULTS
-        }
+        WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = true
         setContentView(ui.column().apply {
             setBackgroundColor(ui.white)
             isFocusableInTouchMode = true
@@ -101,55 +96,65 @@ class MainActivity : AppCompatActivity() {
             addView(navigation, ui.size(-1, 55))
             requestFocus()
         })
-        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() = back()
-        })
-        lifecycleScope.launch { model.state.collect { showCatalog(it) } }
-        select(page)
+        onBackPressedDispatcher.addCallback(this) { back() }
+        lifecycleScope.launch {
+            model.state.collect { state -> catalog?.let { paintCars(it, state) } }
+        }
+        navigate(route)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
-        outState.putString("page", page.name)
-        outState.putString("draft", query)
-        outState.putString("car_page_from", carPageFrom.name)
-        selectedCar?.let { car ->
-            outState.putBundle("selected_car", Bundle().apply {
-                putInt("id", car.id)
-                putString("model", car.model)
-                putString("brand", car.brand)
-                putInt("price", car.price)
-                putString("transmission", car.transmission)
-                putString("fuel", car.fuel)
-            })
-            outState.putString("rent_start", rentalDates.start.toString())
-            outState.putString("rent_end", rentalDates.end.toString())
+        val selected = car?.takeIf { page == Page.DETAILS || page == Page.RENT }?.let {
+            bundleOf("id" to it.id, "model" to it.model, "brand" to it.brand,
+                "price" to it.price, "transmission" to it.transmission, "fuel" to it.fuel)
         }
+        outState.putAll(bundleOf("route" to ArrayList(route.map(Page::name)), "draft" to query,
+            "booking_id" to bookingId, "selected_car" to selected,
+            "rent_start" to dates.start.toString(), "rent_end" to dates.end.toString()))
         super.onSaveInstanceState(outState)
     }
 
-    private fun select(next: Page) {
+    private fun open(next: Page) = navigate(route + next)
+    private fun back() = when {
+        route.size == 1 -> finish()
+        page == Page.SUCCESS -> switchTab(Page.HOME)
+        else -> navigate(route.dropLast(1))
+    }
+    private fun switchTab(next: Page) {
+        if (next == Page.HOME) query = ""
+        navigate(listOf(Page.HOME, next).distinct())
+    }
+
+    private fun navigate(next: List<Page>) {
         typing?.cancel()
-        page = next
-        if (next == Page.PROFILE || next == Page.SETTINGS) loadAvatar()
-        if (next == Page.HOME || next == Page.RESULTS) {
-            if (next == Page.HOME) preferences.edit().remove("query").apply()
-            model.load(if (next == Page.HOME) "" else query)
+        pageRequest?.cancel()
+        route = next
+        when (page) {
+            Page.HOME -> {
+                preferences.edit().remove("query").apply()
+                model.load("")
+            }
+            Page.RESULTS -> model.load(query)
+            Page.SETTINGS, Page.PROFILE -> loadAvatar()
+            else -> Unit
         }
         render()
     }
 
-    private fun render() {
+    private fun render(): Unit = with(ui) {
         body.removeAllViews()
         catalog = null
-        list = null
-        message = null
         window.statusBarColor = if (page == Page.HOME) ui.lavender else ui.white
-        navigation.visibility = if (page == Page.RENT || page == Page.BOOKINGS) View.GONE else View.VISIBLE
         drawNavigation()
         when (page) {
-            Page.HOME, Page.RESULTS -> renderCatalog()
+            Page.HOME, Page.RESULTS -> {
+                catalog = carList().also { paintCars(it, model.state.value) }
+            }
+            Page.FAVORITES -> loadScreen("Избранное", null, {
+                cars.favorites(favorites.mapNotNull(String::toIntOrNull).toSet())
+            }) { paintCars(carList(), CatalogViewModel.State(cars = it, loading = false), "Нет избранных автомобилей") }
             Page.SETTINGS -> scroll(profile.settings { setting ->
-                select(when (setting) {
+                open(when (setting) {
                     "Профиль" -> Page.PROFILE
                     "Мои бронирования" -> Page.BOOKINGS
                     else -> Page.ADD_CAR
@@ -157,158 +162,215 @@ class MainActivity : AppCompatActivity() {
             })
             Page.PROFILE -> scroll(profile.profile({
                 avatarPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-            }, {
-                avatarRequest?.cancel()
-                lifecycleScope.launch {
-                    try {
-                        account.signOut()
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (_: Exception) {
-                        Toast.makeText(this@MainActivity, "Сессия на устройстве завершена.", Toast.LENGTH_SHORT).show()
-                    }
-                    preferences.edit().clear().apply()
-                    openLogin()
-                }
-            }))
-            Page.FAVORITES -> renderDestination("Избранное", "Нет избранных автомобилей")
-            Page.BOOKINGS -> renderBookings()
-            Page.ADD_CAR -> renderDestination("Добавление автомобиля", "Марка, модель и характеристики", addCar = true)
-            Page.DETAILS -> selectedCar?.let { car ->
-                renderDestination("Детали",
-                    "${car.brand} ${car.model}\n${car.price} ₽ в день\n${car.transmission} · ${car.fuel}", car = true)
-            }
-            Page.RENT -> selectedCar?.let { car ->
-                val screen = bookingScreen.rental(car, rentalDates, ::back, { dates ->
-                    rentalDates = dates
-                    render()
-                }, {
-                    if (!bookingPending) {
-                        bookingPending = true
-                        val dates = rentalDates
-                        cloud("Не удалось подтвердить бронирование.") {
-                            try {
-                                bookings.book(car, dates.start, dates.end)
-                                if (page == Page.RENT && selectedCar == car) select(Page.BOOKINGS)
-                            } finally {
-                                bookingPending = false
-                            }
-                        }
-                    }
+            }, ::signOut))
+            Page.DETAILS -> car?.let { loadScreen("Детали", ::back, { cars.details(it.id) }, ::showDetails) }
+            Page.RENT -> car?.let { selected -> body.addView(bookingScreen.rental(selected, dates, ::back, {
+                dates = it
+                render()
+            }) { rent(selected) }) }
+            Page.SUCCESS -> body.addView(bookingScreen.success({ switchTab(Page.HOME) }) { open(Page.BOOKINGS) })
+            Page.BOOKINGS -> loadScreen("Мои бронирования", ::back, bookings::list) { items ->
+                scroll(bookingScreen.bookings(items, ::back) { id ->
+                    bookingId = id
+                    open(Page.BOOKING_DETAIL)
                 })
-                body.addView(screen, FrameLayout.LayoutParams(-1, -1))
             }
-        }
-    }
-
-    private fun loadAvatar() {
-        if (avatarLoaded || avatarRequest?.isActive == true) return
-        avatarRequest = lifecycleScope.launch {
-            try {
-                profile.photo = account.avatar()
-                avatarLoaded = true
-                if (page == Page.PROFILE || page == Page.SETTINGS) render()
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                // A temporary connection error leaves the default avatar visible.
-            }
-        }
-    }
-
-    private fun renderBookings() = with(ui) {
-        val content = column().apply {
-            setPadding(dp(20), 0, dp(20), 0)
-            addView(title("Мои бронирования", 60, ::back))
-            addView(ProgressBar(this@MainActivity), size(40, 40).apply { gravity = Gravity.CENTER_HORIZONTAL })
-        }
-        scroll(content)
-        lifecycleScope.launch {
-            try {
-                val items = bookings.list()
-                if (content.isAttachedToWindow) {
-                    body.removeAllViews()
-                    scroll(bookingScreen.bookings(items, ::back))
+            Page.BOOKING_DETAIL -> showBooking()
+            Page.ADD_CAR -> scroll(column().apply {
+                setPadding(dp(20), 0, dp(20), dp(16))
+                addView(title("Добавление автомобиля", 54, ::back))
+                gap(this, 12)
+                addView(label("Марка, модель и характеристики", 16f))
+                for (field in listOf("Марка", "Модель", "Цена в день")) {
+                    addView(EditText(this@MainActivity).apply { hint = field }, size(-1, 50))
                 }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                if (content.isAttachedToWindow) {
-                    content.removeViewAt(1)
-                    content.addView(label("Не удалось загрузить бронирования.", 15f))
-                    gap(content, 12)
-                    content.addView(button("Повторить", action = ::render), size(-1, 48))
-                }
+            })
+        }
+        Unit
+    }
+
+    private fun rent(selected: Car) {
+        val chosen = dates
+        changeBooking("Не удалось подтвердить бронирование.") { previous ->
+            bookings.book(selected, chosen.start, chosen.end)
+            if (route === previous && dates == chosen) navigate(listOf(Page.HOME, Page.SUCCESS))
+        }
+    }
+
+    private fun showBooking() = loadScreen("Бронирование # $bookingId", ::back, {
+        bookings.details(bookingId) to bookings.driver()
+    }) { (booking, driver) ->
+        body.addView(bookingScreen.details(booking, driver, ::back) {
+            changeBooking("Не удалось отменить бронирование.") { previous ->
+                val cancelled = bookings.cancel(booking.id)
+                if (route === previous) back()
+                check(cancelled) { "Бронирование уже завершилось или было удалено." }
+            }
+        })
+    }
+
+    private fun changeBooking(error: String, action: suspend (List<Page>) -> Unit) {
+        if (bookingPending) return
+        bookingPending = true
+        val previous = route
+        request({ notice((it as? IllegalStateException)?.message ?: error) }) {
+            try {
+                action(previous)
+            } finally {
+                bookingPending = false
             }
         }
     }
 
-    private fun cloud(message: String, action: suspend () -> Unit) = lifecycleScope.launch {
+    private fun openCar(selected: Car, rent: Boolean) {
+        car = selected
+        dates = BookingScreen.Dates()
+        open(if (rent) Page.RENT else Page.DETAILS)
+    }
+
+    private fun showDetails(selected: Car) {
+        car = selected
+        val key = selected.id.toString()
+        val saved = key in favorites
+        body.removeAllViews()
+        body.addView(detailsScreen.show(selected, saved, ::back, {
+            val updated = if (saved) favorites - key else favorites + key
+            if (favoritePrefs.edit().putStringSet(favoriteKey, updated).commit()) showDetails(selected)
+            else notice("Не удалось обновить избранное. Попробуйте снова.")
+        }, {
+            dates = BookingScreen.Dates()
+            open(Page.RENT)
+        }))
+    }
+
+    private fun loadAvatar(uri: Uri? = null) {
+        if (uri == null && (avatarLoaded || avatarRequest?.isActive == true)) return
+        avatarRequest?.cancel()
+        avatarRequest = request({ if (uri != null) notice("Не удалось загрузить фото.") }) {
+            if (uri != null) account.saveAvatar(uri)
+            profile.photo = account.avatar()
+            avatarLoaded = true
+            if (page == Page.PROFILE || page == Page.SETTINGS) render()
+        }
+    }
+
+    private fun signOut() {
+        avatarRequest?.cancel()
+        request({ notice("Сессия на устройстве завершена.") }) {
+            try {
+                account.signOut()
+            } finally {
+                preferences.edit().clear().apply()
+                if (!isDestroyed) openLogin()
+            }
+        }    }
+
+    private fun openLogin() {
+        startActivity(Intent(this, AuthActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+        finish()
+    }
+
+    private fun request(fail: (Exception) -> Unit, action: suspend () -> Unit) = lifecycleScope.launch {
         try {
             action()
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
-            val text = if (error is IllegalStateException) error.message ?: message else message
-            Toast.makeText(this@MainActivity, text, Toast.LENGTH_SHORT).show()
+            fail(error)
+        }
+    }
+
+    private fun notice(message: String) = Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    private fun <T> loadScreen(name: String, back: (() -> Unit)?, load: suspend () -> T, show: (T) -> Unit) {
+        val panel = area(ui.title(name, 60, back))
+        panel.addView(feedback())
+        val previous = route
+        pageRequest = request({
+            panel.removeAllViews()
+            panel.addView(feedback("Не удалось загрузить данные. Попробуйте снова.", ::render))
+        }) {
+            val result = load()
+            if (route === previous) {
+                body.removeAllViews()
+                show(result)
+            }
+        }
+    }
+
+    private fun feedback(message: String? = null, retry: (() -> Unit)? = null) = with(ui) {
+        column().apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(22), 0, dp(22), 0)
+            if (message == null) addView(ProgressBar(this@MainActivity), size(40, 40))
+            else addView(label(message, 16f).apply { gravity = Gravity.CENTER })
+            if (retry != null) {
+                gap(this, 16)
+                addView(button("Повторить", action = retry), size(160, 42))
+            }
         }
     }
 
     private fun drawNavigation() = with(ui) {
         navigation.removeAllViews()
+        val currentTab = route.getOrNull(1) ?: Page.HOME
+        navigation.visibility = when (page) {
+            Page.RENT, Page.BOOKINGS, Page.BOOKING_DETAIL, Page.SUCCESS -> View.GONE
+            else -> View.VISIBLE
+        }
         navigation.setBackgroundColor(white)
         navigation.elevation = dp(5).toFloat()
         navigation.setPadding(dp(44), 0, dp(44), 0)
-        val home = page in listOf(Page.HOME, Page.RESULTS, Page.DETAILS, Page.RENT)
-        val settings = page in listOf(Page.SETTINGS, Page.PROFILE, Page.BOOKINGS, Page.ADD_CAR)
-        navItem("Главная", if (home) R.drawable.lab3_home_filled else R.drawable.lab3_home_outline, home) {
-            query = ""
-            select(Page.HOME)
-        }
-        navItem("Избранное", R.drawable.lab3_favorite, page == Page.FAVORITES) { select(Page.FAVORITES) }
-        navItem("Настройки", if (settings) R.drawable.lab3_settings_filled else R.drawable.lab3_settings_outline, settings) {
-            select(Page.SETTINGS)
-        }
+        val active = if (currentTab == Page.RESULTS) Page.HOME else currentTab
+        nav(Page.HOME, "Главная", R.drawable.lab3_home_outline, R.drawable.lab3_home_filled, active)
+        nav(Page.FAVORITES, "Избранное", R.drawable.lab3_favorite, R.drawable.lab4_favorite_filled, active)
+        nav(Page.SETTINGS, "Настройки", R.drawable.lab3_settings_outline, R.drawable.lab3_settings_filled, active)
     }
 
-    private fun navItem(title: String, icon: Int, selected: Boolean, action: () -> Unit) = with(ui) {
-        val item = FrameLayout(this@MainActivity).apply {
-            contentDescription = title
-            isSelected = selected
-            setOnClickListener { action() }
-            addView(icon(icon), FrameLayout.LayoutParams(dp(25), dp(25), Gravity.CENTER))
+    private fun nav(tab: Page, name: String, outline: Int, filled: Int, active: Page) = with(ui) {
+        val item = icon(if (tab == active) filled else outline).apply {
+            contentDescription = name
+            isSelected = tab == active
+            setPadding(0, dp(15), 0, dp(15))
+            setOnClickListener { switchTab(tab) }
         }
         navigation.addView(item, LinearLayout.LayoutParams(0, -1, 1f))
     }
 
-    private fun renderCatalog() = with(ui) {
-        val content = column()
-        body.addView(content, FrameLayout.LayoutParams(-1, -1))
-        if (page == Page.HOME) content.addView(searchHeader())
-        else {
-            gap(content, 18)
-            content.addView(title("Результаты поиска", 76, ::back))
+    private fun carList() = with(ui) {
+        val header = when (page) {
+            Page.HOME -> searchHeader()
+            Page.FAVORITES -> title("Избранное", 76)
+            else -> column().apply {
+                gap(this, 18)
+                addView(title("Результаты поиска", 76, ::back))
+            }
         }
+        area(header).apply {
+            addView(RecyclerView(this@MainActivity).apply {
+                layoutManager = LinearLayoutManager(this@MainActivity)
+                adapter = this@MainActivity.adapter
+                clipToPadding = false
+                setPadding(dp(20), dp(if (page == Page.HOME) 32 else 0), dp(20), 0)
+            })
+        }
+    }
 
-        catalog = FrameLayout(this@MainActivity).also {
-            content.addView(it, LinearLayout.LayoutParams(-1, 0, 1f))
+    private fun paintCars(panel: FrameLayout, state: CatalogViewModel.State, empty: String = "Автомобили не найдены") {
+        adapter.show(state.cars)
+        if (panel.childCount > 1) panel.removeViewAt(1)
+        when {
+            state.loading -> panel.addView(feedback())
+            state.error != null -> panel.addView(feedback(state.error) { model.load(state.query) })
+            state.cars.isEmpty() -> panel.addView(feedback(empty))
         }
-        list = RecyclerView(this@MainActivity).apply {
-            layoutManager = LinearLayoutManager(this@MainActivity)
-            adapter = this@MainActivity.adapter
-            clipToPadding = false
-            setPadding(dp(20), dp(if (page == Page.HOME) 32 else 0), dp(20), 0)
-        }
-        catalog?.addView(list, FrameLayout.LayoutParams(-1, -1))
-        showCatalog(model.state.value)
     }
 
     private fun searchHeader() = with(ui) {
         column().apply {
             setBackgroundColor(lavender)
             setPadding(dp(20), dp(56), dp(20), dp(27))
-            val search = SearchView(this@MainActivity).apply {
-                isIconified = false
+            addView(SearchView(this@MainActivity).apply {
                 setIconifiedByDefault(false)
                 queryHint = "Введите марку автомобиля"
                 background = box(white, 9)
@@ -326,96 +388,38 @@ class MainActivity : AppCompatActivity() {
                         height = dp(24)
                     }
                 }
-                findViewById<android.view.View>(androidx.appcompat.R.id.search_plate).background = null
+                findViewById<View>(androidx.appcompat.R.id.search_plate).background = null
                 setQuery(this@MainActivity.query, false)
                 clearFocus()
                 setOnQueryTextListener(object : SearchView.OnQueryTextListener {
-                    override fun onQueryTextSubmit(value: String): Boolean {
-                        startSearch(value)
-                        return true
-                    }
-
-                    override fun onQueryTextChange(value: String): Boolean {
-                        typing?.cancel()
-                        this@MainActivity.query = value.trim()
-                        if (value.isNotBlank()) typing = lifecycleScope.launch {
-                            delay(850)
-                            startSearch(value)
-                        }
-                        return true
-                    }
+                    override fun onQueryTextSubmit(value: String) = search(value, wait = false)
+                    override fun onQueryTextChange(value: String) = search(value, wait = true)
                 })
-            }
-            addView(search, size(-1, 45))
+            }, size(-1, 45))
             gap(this, 39)
             addView(label("Давайте найдем автомобиль", 17f, bold = true))
         }
     }
 
-    private fun startSearch(value: String) {
-        query = value.trim()
-        if (query.isBlank()) return
-        getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(body.windowToken, 0)
-        preferences.edit().putString("query", query).apply()
-        select(Page.RESULTS)
-    }
-
-    private fun showCatalog(state: CatalogViewModel.State) = with(ui) {
-        val frame = catalog ?: return@with
-        adapter.show(state.cars)
-        message?.let { frame.removeView(it) }
-        if (!state.loading && state.error == null && state.cars.isNotEmpty()) return@with
-        message = column().apply {
-            gravity = Gravity.CENTER
-            setPadding(dp(22), 0, dp(22), 0)
-            if (state.loading) addView(ProgressBar(this@MainActivity), size(40, 40))
-            else {
-                addView(label(state.error ?: "Автомобили не найдены", 16f).apply { gravity = Gravity.CENTER })
-                if (state.error != null) {
-                    gap(this, 16)
-                    addView(button("Повторить") { model.load(state.query) }, size(160, 42))
-                }
-            }
+    private fun search(value: String, wait: Boolean): Boolean {
+        val typed = value.trim()
+        query = typed
+        typing?.cancel()
+        if (typed.isNotEmpty()) typing = lifecycleScope.launch {
+            if (wait) delay(850)
+            getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(body.windowToken, 0)
+            preferences.edit().putString("query", typed).apply()
+            open(Page.RESULTS)
         }
-        frame.addView(message, FrameLayout.LayoutParams(-1, -1))
+        return true
     }
 
-    private fun openCar(car: Car, rent: Boolean) {
-        carPageFrom = page
-        selectedCar = car
-        rentalDates = BookingScreen.Dates()
-        select(if (rent) Page.RENT else Page.DETAILS)
-    }
-
-    private fun renderDestination(title: String, text: String, car: Boolean = false, addCar: Boolean = false) = with(ui) {
-        scroll(column().apply {
-            setPadding(dp(20), 0, dp(20), dp(16))
-            addView(title(title, 54, if (page == Page.FAVORITES) null else ::back))
-            if (car) addView(icon(R.drawable.lab3_mercedes), size(-1, 160))
-            gap(this, 12)
-            addView(label(text, 16f))
-            if (addCar) listOf("Марка", "Модель", "Цена в день").forEach { hint ->
-                addView(EditText(this@MainActivity).apply { this.hint = hint }, size(-1, 50))
-            }
+    private fun area(header: View) = FrameLayout(this).also { content ->
+        body.addView(ui.column().apply {
+            addView(header)
+            addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
         })
     }
 
-    private fun scroll(content: LinearLayout) {
-        body.addView(ScrollView(this).apply { addView(content) }, FrameLayout.LayoutParams(-1, -1))
-    }
-
-    private fun back() {
-        when (page) {
-            Page.PROFILE, Page.BOOKINGS, Page.ADD_CAR -> select(Page.SETTINGS)
-            Page.DETAILS, Page.RENT -> select(carPageFrom)
-            Page.HOME -> finish()
-            else -> select(Page.HOME)
-        }
-    }
-
-    private fun openLogin() {
-        startActivity(Intent(this, AuthActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
-        finish()
-    }
+    private fun scroll(content: View) = body.addView(ScrollView(this).apply { addView(content) })
 }

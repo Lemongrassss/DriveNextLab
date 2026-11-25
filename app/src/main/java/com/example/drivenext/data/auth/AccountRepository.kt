@@ -21,6 +21,7 @@ internal class AccountRepository(private val context: Context) {
     private val prefs = context.getSharedPreferences("supabase_account", Context.MODE_PRIVATE)
     private val user get() = JSONObject(prefs.getString("user", "{}") ?: "{}")
     private val metadata get() = user.optJSONObject("user_metadata") ?: JSONObject()
+    val id get() = user.optString("id")
     val email get() = user.optString("email")
     val name get() = metadata.optString("full_name").ifBlank { email.substringBefore('@') }
     val gender get() = metadata.optString("gender", "—")
