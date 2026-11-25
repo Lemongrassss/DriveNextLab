@@ -5,11 +5,10 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:label="@string/app_name"
-        android:networkSecurityConfig="@xml/network_security_config"
         android:supportsRtl="true"
         android:theme="@style/Theme.DriveNext">
 
@@ -21,6 +20,15 @@
             <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
         </provider>
         <activity android:name=".presentation.auth.AuthActivity" android:exported="false" />
+        <activity android:name=".presentation.auth.OAuthCallbackActivity" android:exported="true"
+            android:noHistory="true" android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="com.example.drivenext" android:host="auth" android:path="/callback" />
+            </intent-filter>
+        </activity>
         <activity android:name=".presentation.main.MainActivity" android:exported="false"
             android:windowSoftInputMode="adjustResize" />
         <activity android:name=".presentation.gateway.GatewayActivity" android:exported="false" />

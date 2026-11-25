@@ -1,18 +1,16 @@
 package com.example.drivenext.presentation.auth
 
 import android.app.DatePickerDialog
-import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
-import android.text.Editable
 import android.text.InputType
-import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.widget.doAfterTextChanged
 import com.example.drivenext.R
 import java.util.Calendar
 import java.util.Locale
@@ -28,11 +26,11 @@ class AuthUi(
     private val border = Color.rgb(207, 213, 223)
     val body = LinearLayout(activity).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(28), 0, dp(28), dp(16))
+        setPadding(dp(20), 0, dp(20), dp(16))
     }
     private val bottom = LinearLayout(activity).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(28), dp(8), dp(28), dp(62))
+        setPadding(dp(20), dp(8), dp(20), dp(52))
     }
 
     fun attach() {
@@ -49,7 +47,7 @@ class AuthUi(
 
     fun title(title: String, back: Boolean = false) {
         val row = FrameLayout(activity)
-        body.addView(row, LinearLayout.LayoutParams(-1, dp(88)))
+        body.addView(row, LinearLayout.LayoutParams(-1, dp(60)))
         row.addView(TextView(activity).apply {
             text = title
             textSize = 21f
@@ -98,13 +96,7 @@ class AuthUi(
             setPadding(dp(14), 0, if (password) dp(46) else dp(14), 0)
             inputType = if (password) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD else keyboard
             setText(values[key].orEmpty())
-            addTextChangedListener(object : TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                    values[key] = s.toString()
-                }
-                override fun afterTextChanged(s: Editable?) {}
-            })
+            doAfterTextChanged { values[key] = it.toString() }
         }
         frame.addView(edit, FrameLayout.LayoutParams(-1, -1))
         if (password) {
@@ -132,7 +124,11 @@ class AuthUi(
     fun dateField(label: String, key: String) {
         text(label)
         val date = TextView(activity).apply {
-            text = "▦  " + (values[key] ?: "DD/MM/YYYY")
+            text = values[key] ?: "DD/MM/YYYY"
+            val calendar = activity.getDrawable(R.drawable.lab2_calendar)
+            calendar?.setBounds(0, 0, dp(20), dp(20))
+            setCompoundDrawables(calendar, null, null, null)
+            compoundDrawablePadding = dp(8)
             textSize = 14f
             setTextColor(hintColor)
             gravity = Gravity.CENTER_VERTICAL
@@ -142,7 +138,7 @@ class AuthUi(
                 val today = Calendar.getInstance()
                 DatePickerDialog(activity, { _, year, month, day ->
                     values[key] = "%02d/%02d/%04d".format(Locale.US, day, month + 1, year)
-                    text = "▦  ${values[key]}"
+                    text = values[key]
                 }, today.get(Calendar.YEAR), today.get(Calendar.MONTH), today.get(Calendar.DAY_OF_MONTH)).show()
             }
         }
@@ -174,8 +170,8 @@ class AuthUi(
         val icon = ImageView(activity).apply {
             if (values.containsKey(key)) setImageURI(Uri.parse(values[key]))
             else {
-                setImageResource(android.R.drawable.ic_menu_upload)
-                imageTintList = ColorStateList.valueOf(hintColor)
+                setImageResource(R.drawable.lab2_upload)
+                setPadding(dp(7), dp(7), dp(7), dp(7))
             }
             scaleType = ImageView.ScaleType.CENTER_INSIDE
             background = outline()
@@ -202,5 +198,4 @@ class AuthUi(
         cornerRadius = dp(7).toFloat()
         setStroke(dp(1), border)
     }
-    fun avatarTint() = ColorStateList.valueOf(border)
 }

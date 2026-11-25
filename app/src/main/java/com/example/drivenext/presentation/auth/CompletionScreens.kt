@@ -4,18 +4,16 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.view.Gravity
 import android.widget.LinearLayout
-import android.widget.TextView
+import android.widget.ImageView
+import com.example.drivenext.R
 
 class CompletionScreens(private val ui: AuthUi) {
     fun success(onNext: () -> Unit) = with(ui) {
         title("Пользуйтесь с удовольствием")
         spacer(150)
-        val tick = TextView(activity).apply {
-            text = "✓"
-            textSize = 45f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            background = rounded(purple, 100)
+        val tick = ImageView(activity).apply {
+            setImageResource(R.drawable.lab2_success)
+            scaleType = ImageView.ScaleType.FIT_CENTER
         }
         body.addView(tick, LinearLayout.LayoutParams(dp(82), dp(82)).apply {
             gravity = Gravity.CENTER_HORIZONTAL
@@ -28,10 +26,4 @@ class CompletionScreens(private val ui: AuthUi) {
         bottomButton("Далее", onNext)
     }
 
-    fun home(onSignOut: () -> Unit) = with(ui) {
-        title("DriveNext")
-        spacer(90)
-        text("Главный экран", 25f, purple, true)
-        bottomButton("Выйти", onSignOut)
-    }
 }

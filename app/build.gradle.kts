@@ -13,9 +13,10 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
-        val serverUrl = providers.gradleProperty("DRIVENEXT_SERVER_URL")
-            .getOrElse("http://10.0.2.2:8000")
-        buildConfigField("String", "SERVER_URL", "\"$serverUrl\"")
+        val url = providers.gradleProperty("DRIVENEXT_SUPABASE_URL").getOrElse("")
+        val key = providers.gradleProperty("DRIVENEXT_SUPABASE_KEY").getOrElse("")
+        buildConfigField("String", "SUPABASE_URL", "\"$url\"")
+        buildConfigField("String", "SUPABASE_KEY", "\"$key\"")
     }
 
     buildTypes {

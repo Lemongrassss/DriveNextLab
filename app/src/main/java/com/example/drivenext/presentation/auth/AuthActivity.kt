@@ -4,7 +4,11 @@ import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
+import android.text.InputType
+import android.util.Patterns
 import android.view.View
+import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.PickVisualMediaRequest
@@ -12,10 +16,14 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
-import com.example.drivenext.data.auth.LocalAccountRepository
+import androidx.lifecycle.lifecycleScope
+import com.example.drivenext.data.auth.AccountRepository
+import com.example.drivenext.data.cloud.Supabase
 import com.example.drivenext.domain.auth.AuthFormValidator
 import com.example.drivenext.presentation.main.MainActivity
 import java.io.File
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 
 class AuthActivity : AppCompatActivity() {
     companion object {
@@ -28,12 +36,13 @@ class AuthActivity : AppCompatActivity() {
         const val HOME = 5
     }
 
-    private val account by lazy { LocalAccountRepository(applicationContext) }
+    private val account by lazy { AccountRepository(applicationContext) }
     private val values = mutableMapOf<String, String>()
     private var screen = LOGIN
     private var enteredFromLogin = false
     private var photoTarget = ""
     private var pendingCameraUri: Uri? = null
+    private var busy = false
 
     private val pickPhoto = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) {
@@ -62,6 +71,13 @@ class AuthActivity : AppCompatActivity() {
             override fun handleOnBackPressed() { goBack() }
         })
         render()
+        intent.getStringExtra("oauth_code")?.let { code ->
+            runRequest {
+                account.finishGoogle(code)
+                show(HOME)
+            }
+        }
+        intent.getStringExtra("oauth_error")?.let(::message)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -69,7 +85,8 @@ class AuthActivity : AppCompatActivity() {
         outState.putBoolean("entered_from_login", enteredFromLogin)
         outState.putString("photo_target", photoTarget)
         outState.putString("camera_uri", pendingCameraUri?.toString())
-        outState.putStringArrayList("entries", ArrayList(values.map { "${it.key}=${it.value}" }))
+        val draft = values.filterKeys { it !in setOf("password", "repeat", "login_password") }
+        outState.putStringArrayList("entries", ArrayList(draft.map { "${it.key}=${it.value}" }))
         super.onSaveInstanceState(outState)
     }
 
@@ -97,7 +114,7 @@ class AuthActivity : AppCompatActivity() {
             LOGIN -> LoginScreen(ui).show(::signIn, {
                 enteredFromLogin = true
                 show(REGISTER_ONE)
-            }, ::message)
+            }, ::recover, ::google)
             REGISTER_ONE -> RegistrationScreens(ui, values).first { advance(AuthFormValidator.firstStep(values), REGISTER_TWO) }
             REGISTER_TWO -> RegistrationScreens(ui, values).second { advance(AuthFormValidator.secondStep(values), REGISTER_THREE) }
             REGISTER_THREE -> RegistrationScreens(ui, values).third(::completeRegistration, ::choosePhoto)
@@ -107,20 +124,91 @@ class AuthActivity : AppCompatActivity() {
 
     private fun signIn() {
         AuthFormValidator.login(values)?.let { message(it); return }
-        if (!account.signIn(values["login_email"].orEmpty(), values["login_password"].orEmpty())) {
-            message("Неверная электронная почта или пароль.")
-            return
+        runRequest {
+            val email = values["login_email"].orEmpty()
+            val password = values["login_password"].orEmpty()
+            if (account.signIn(email, password)) show(HOME)
+            else {
+                values["email"] = email
+                values["password"] = password
+                enteredFromLogin = true
+                show(REGISTER_ONE)
+                message("Заверши регистрацию и загрузи документы.")
+            }
         }
-        show(HOME)
     }
 
     private fun completeRegistration() {
         AuthFormValidator.thirdStep(values)?.let { message(it); return }
-        val name = listOfNotNull(values["first_name"], values["surname"]).joinToString(" ")
-        account.register(values["email"].orEmpty(), values["password"].orEmpty(),
-            name, values["gender"].orEmpty())
-        values["avatar"]?.let { account.saveAvatar(Uri.parse(it)) }
-        show(SUCCESS)
+        AuthFormValidator.firstStep(values)?.let { message(it); show(REGISTER_ONE); return }
+        AuthFormValidator.secondStep(values)?.let { message(it); show(REGISTER_TWO); return }
+        runRequest {
+            account.register(values.toMap())
+            show(SUCCESS)
+        }
+    }
+
+    private fun google() = runRequest {
+        startActivity(Intent(Intent.ACTION_VIEW, account.googleUrl()))
+    }
+
+    private fun recover() {
+        val email = values["login_email"].orEmpty().trim()
+        if (!Patterns.EMAIL_ADDRESS.matcher(email).matches()) {
+            message("Введи электронную почту для восстановления.")
+            return
+        }
+        runRequest {
+            account.sendRecovery(email)
+            val code = EditText(this).apply { hint = "Код из письма"; inputType = InputType.TYPE_CLASS_NUMBER }
+            val password = EditText(this).apply {
+                hint = "Новый пароль"
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            }
+            val fields = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(code)
+                addView(password)
+            }
+            val dialog = AlertDialog.Builder(this).setTitle("Восстановление пароля").setView(fields)
+                .setNegativeButton("Отмена", null).setPositiveButton("Сохранить", null).create()
+            dialog.setOnShowListener {
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                    if (code.text.isNotBlank() && password.text.length >= 6) runRequest {
+                        account.resetPassword(email, code.text.toString().trim(), password.text.toString())
+                        dialog.dismiss()
+                        message("Пароль обновлён. Войди с новым паролем.")
+                    } else message("Введи код и пароль из 6 или более символов.")
+                }
+            }
+            dialog.show()
+        }
+    }
+
+    private fun runRequest(action: suspend () -> Unit) {
+        if (busy) return
+        busy = true
+        val progress = AlertDialog.Builder(this).setView(android.widget.ProgressBar(this))
+            .setMessage("Подождите…").setCancelable(false).create()
+        progress.show()
+        lifecycleScope.launch {
+            try {
+                action()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Supabase.Error) {
+                message(when (error.code) {
+                    "invalid_credentials" -> "Неверная электронная почта или пароль."
+                    "email_not_confirmed" -> "Подтверди почту по ссылке из письма и повтори действие."
+                    else -> error.message.orEmpty()
+                })
+            } catch (error: Exception) {
+                message(error.localizedMessage ?: "Не удалось выполнить запрос. Попробуй снова.")
+            } finally {
+                progress.dismiss()
+                busy = false
+            }
+        }
     }
 
     private fun advance(error: String?, destination: Int) {

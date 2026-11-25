@@ -10,11 +10,12 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
+import com.example.drivenext.R
 
 class RegistrationScreens(private val ui: AuthUi, private val values: MutableMap<String, String>) {
     fun first(onNext: () -> Unit) = with(ui) {
         title("Создать аккаунт", true)
-        spacer(90)
+        spacer(67)
         field("Электронная почта", "Введите электронную почту", "email",
             keyboard = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS)
         field("Придумайте пароль", "Введите пароль", "password", password = true)
@@ -33,7 +34,7 @@ class RegistrationScreens(private val ui: AuthUi, private val values: MutableMap
 
     fun second(onNext: () -> Unit) = with(ui) {
         title("Создать аккаунт", true)
-        spacer(28)
+        spacer(13)
         field("Фамилия", "Введите фамилию", "surname")
         field("Имя", "Введите имя", "first_name")
         field("Отчество", "Введите отчество", "patronymic")
@@ -58,16 +59,15 @@ class RegistrationScreens(private val ui: AuthUi, private val values: MutableMap
         title("Создать аккаунт", true)
         val avatar = ImageView(activity).apply {
             if (values.containsKey("avatar")) setImageURI(Uri.parse(values["avatar"]))
-            else {
-                setImageResource(android.R.drawable.ic_menu_myplaces)
-                imageTintList = avatarTint()
-            }
-            scaleType = ImageView.ScaleType.CENTER_INSIDE
-            setPadding(dp(32), dp(15), dp(32), dp(15))
+            else setImageResource(R.drawable.lab2_avatar)
+            scaleType = ImageView.ScaleType.FIT_CENTER
             setOnClickListener { onPhoto("avatar") }
             contentDescription = "Добавить фото профиля"
         }
-        body.addView(avatar, LinearLayout.LayoutParams(-1, dp(150)))
+        body.addView(avatar, LinearLayout.LayoutParams(dp(132), dp(132)).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            bottomMargin = dp(26)
+        })
         text("Добавление фотографии поможет владельцам и арендаторам узнать друг друга, когда они будут забирать машину")
         spacer(18)
         field("Номер водительского удостоверения", "0000000000", "licence", keyboard = InputType.TYPE_CLASS_NUMBER)

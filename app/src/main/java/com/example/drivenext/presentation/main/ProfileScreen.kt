@@ -1,16 +1,17 @@
 package com.example.drivenext.presentation.main
 
-import android.net.Uri
+import android.graphics.Bitmap
 import android.view.Gravity
 import android.widget.ImageView
 import android.widget.LinearLayout
 import com.example.drivenext.R
-import com.example.drivenext.data.auth.LocalAccountRepository
+import com.example.drivenext.data.auth.AccountRepository
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-internal class ProfileScreen(private val ui: MainUi, private val account: LocalAccountRepository) {
+internal class ProfileScreen(private val ui: MainUi, private val account: AccountRepository) {
+    var photo: Bitmap? = null
     fun settings(open: (String) -> Unit) = with(ui) {
         column().apply {
             setPadding(dp(14), 0, dp(14), 0)
@@ -71,11 +72,11 @@ internal class ProfileScreen(private val ui: MainUi, private val account: LocalA
 
     private fun avatar(profile: Boolean): ImageView = with(ui) {
         val image = icon(if (profile) R.drawable.lab3_avatar else R.drawable.lab3_avatar_empty)
-        account.avatar?.let {
+        photo?.let {
             image.background = box(white, 100, purple)
             image.clipToOutline = true
             image.scaleType = ImageView.ScaleType.CENTER_CROP
-            image.setImageURI(Uri.fromFile(it))
+            image.setImageBitmap(it)
         }
         image
     }

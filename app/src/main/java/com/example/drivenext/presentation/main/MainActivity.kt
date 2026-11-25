@@ -3,6 +3,7 @@ package com.example.drivenext.presentation.main
 import android.content.Intent
 import android.os.Bundle
 import android.view.Gravity
+import android.view.View
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -22,35 +23,50 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.example.drivenext.R
-import com.example.drivenext.data.auth.LocalAccountRepository
+import com.example.drivenext.data.auth.AccountRepository
+import com.example.drivenext.data.booking.BookingRepository
 import com.example.drivenext.domain.catalog.Car
 import com.example.drivenext.presentation.auth.AuthActivity
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.time.LocalDate
 
 class MainActivity : AppCompatActivity() {
     private enum class Page { HOME, RESULTS, FAVORITES, SETTINGS, PROFILE, BOOKINGS, ADD_CAR, DETAILS, RENT }
 
     private val model by viewModels<CatalogViewModel>()
-    private val account by lazy { LocalAccountRepository(this) }
+    private val account by lazy { AccountRepository(applicationContext) }
     private val preferences by lazy { getSharedPreferences("catalog", MODE_PRIVATE) }
     private val ui by lazy { MainUi(this) }
     private val profile by lazy { ProfileScreen(ui, account) }
+    private val bookings by lazy { BookingRepository(account) }
+    private val bookingScreen by lazy { BookingScreen(this, ui) }
     private var page = Page.HOME
     private var query = ""
     private var typing: Job? = null
     private var carPageFrom = Page.HOME
+    private var selectedCar: Car? = null
+    private var rentalDates = BookingScreen.Dates()
     private lateinit var body: FrameLayout
     private lateinit var navigation: LinearLayout
     private var catalog: FrameLayout? = null
     private var list: RecyclerView? = null
     private var message: LinearLayout? = null
     private val adapter = CarAdapter(::openCar)
+    private var avatarLoaded = false
+    private var avatarRequest: Job? = null
+    private var bookingPending = false
     private val avatarPicker = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null && page == Page.PROFILE) {
-            if (account.saveAvatar(uri)) render()
-            else Toast.makeText(this, "Не удалось загрузить фото.", Toast.LENGTH_SHORT).show()
+            avatarRequest?.cancel()
+            avatarRequest = cloud("Не удалось загрузить фото.") {
+                account.saveAvatar(uri)
+                profile.photo = account.avatar()
+                avatarLoaded = true
+                if (page == Page.PROFILE || page == Page.SETTINGS) render()
+            }
         }
     }
 
@@ -64,7 +80,16 @@ class MainActivity : AppCompatActivity() {
         WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = true
         page = savedInstanceState?.getString("page")?.let(Page::valueOf)
             ?: if (query.isBlank()) Page.HOME else Page.RESULTS
-        if (page == Page.DETAILS || page == Page.RENT) {
+        carPageFrom = savedInstanceState?.getString("car_page_from")?.let(Page::valueOf) ?: Page.HOME
+        selectedCar = savedInstanceState?.getBundle("selected_car")?.let {
+            Car(it.getInt("id"), it.getString("model").orEmpty(), it.getString("brand").orEmpty(),
+                it.getInt("price"), it.getString("transmission").orEmpty(), it.getString("fuel").orEmpty())
+        }
+        savedInstanceState?.getString("rent_start")?.let { start ->
+            val end = savedInstanceState.getString("rent_end") ?: return@let
+            rentalDates = BookingScreen.Dates(LocalDate.parse(start), LocalDate.parse(end))
+        }
+        if ((page == Page.DETAILS || page == Page.RENT) && selectedCar == null) {
             page = if (query.isBlank()) Page.HOME else Page.RESULTS
         }
         setContentView(ui.column().apply {
@@ -86,12 +111,26 @@ class MainActivity : AppCompatActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("page", page.name)
         outState.putString("draft", query)
+        outState.putString("car_page_from", carPageFrom.name)
+        selectedCar?.let { car ->
+            outState.putBundle("selected_car", Bundle().apply {
+                putInt("id", car.id)
+                putString("model", car.model)
+                putString("brand", car.brand)
+                putInt("price", car.price)
+                putString("transmission", car.transmission)
+                putString("fuel", car.fuel)
+            })
+            outState.putString("rent_start", rentalDates.start.toString())
+            outState.putString("rent_end", rentalDates.end.toString())
+        }
         super.onSaveInstanceState(outState)
     }
 
     private fun select(next: Page) {
         typing?.cancel()
         page = next
+        if (next == Page.PROFILE || next == Page.SETTINGS) loadAvatar()
         if (next == Page.HOME || next == Page.RESULTS) {
             if (next == Page.HOME) preferences.edit().remove("query").apply()
             model.load(if (next == Page.HOME) "" else query)
@@ -105,6 +144,7 @@ class MainActivity : AppCompatActivity() {
         list = null
         message = null
         window.statusBarColor = if (page == Page.HOME) ui.lavender else ui.white
+        navigation.visibility = if (page == Page.RENT || page == Page.BOOKINGS) View.GONE else View.VISIBLE
         drawNavigation()
         when (page) {
             Page.HOME, Page.RESULTS -> renderCatalog()
@@ -118,14 +158,99 @@ class MainActivity : AppCompatActivity() {
             Page.PROFILE -> scroll(profile.profile({
                 avatarPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
             }, {
-                account.signOut()
-                preferences.edit().clear().apply()
-                openLogin()
+                avatarRequest?.cancel()
+                lifecycleScope.launch {
+                    try {
+                        account.signOut()
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        Toast.makeText(this@MainActivity, "Сессия на устройстве завершена.", Toast.LENGTH_SHORT).show()
+                    }
+                    preferences.edit().clear().apply()
+                    openLogin()
+                }
             }))
             Page.FAVORITES -> renderDestination("Избранное", "Нет избранных автомобилей")
-            Page.BOOKINGS -> renderDestination("Мои бронирования", "У вас пока нет бронирований")
+            Page.BOOKINGS -> renderBookings()
             Page.ADD_CAR -> renderDestination("Добавление автомобиля", "Марка, модель и характеристики", addCar = true)
-            Page.DETAILS, Page.RENT -> Unit
+            Page.DETAILS -> selectedCar?.let { car ->
+                renderDestination("Детали",
+                    "${car.brand} ${car.model}\n${car.price} ₽ в день\n${car.transmission} · ${car.fuel}", car = true)
+            }
+            Page.RENT -> selectedCar?.let { car ->
+                val screen = bookingScreen.rental(car, rentalDates, ::back, { dates ->
+                    rentalDates = dates
+                    render()
+                }, {
+                    if (!bookingPending) {
+                        bookingPending = true
+                        val dates = rentalDates
+                        cloud("Не удалось подтвердить бронирование.") {
+                            try {
+                                bookings.book(car, dates.start, dates.end)
+                                if (page == Page.RENT && selectedCar == car) select(Page.BOOKINGS)
+                            } finally {
+                                bookingPending = false
+                            }
+                        }
+                    }
+                })
+                body.addView(screen, FrameLayout.LayoutParams(-1, -1))
+            }
+        }
+    }
+
+    private fun loadAvatar() {
+        if (avatarLoaded || avatarRequest?.isActive == true) return
+        avatarRequest = lifecycleScope.launch {
+            try {
+                profile.photo = account.avatar()
+                avatarLoaded = true
+                if (page == Page.PROFILE || page == Page.SETTINGS) render()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // A temporary connection error leaves the default avatar visible.
+            }
+        }
+    }
+
+    private fun renderBookings() = with(ui) {
+        val content = column().apply {
+            setPadding(dp(20), 0, dp(20), 0)
+            addView(title("Мои бронирования", 60, ::back))
+            addView(ProgressBar(this@MainActivity), size(40, 40).apply { gravity = Gravity.CENTER_HORIZONTAL })
+        }
+        scroll(content)
+        lifecycleScope.launch {
+            try {
+                val items = bookings.list()
+                if (content.isAttachedToWindow) {
+                    body.removeAllViews()
+                    scroll(bookingScreen.bookings(items, ::back))
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (content.isAttachedToWindow) {
+                    content.removeViewAt(1)
+                    content.addView(label("Не удалось загрузить бронирования.", 15f))
+                    gap(content, 12)
+                    content.addView(button("Повторить", action = ::render), size(-1, 48))
+                }
+            }
+        }
+    }
+
+    private fun cloud(message: String, action: suspend () -> Unit) = lifecycleScope.launch {
+        try {
+            action()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            val text = if (error is IllegalStateException) error.message ?: message else message
+            Toast.makeText(this@MainActivity, text, Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -256,12 +381,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openCar(car: Car, rent: Boolean) {
-        typing?.cancel()
         carPageFrom = page
-        page = if (rent) Page.RENT else Page.DETAILS
-        render()
-        renderDestination(if (rent) "Оформление аренды" else "Детали",
-            "${car.brand} ${car.model}\n${car.price} ₽ в день\n${car.transmission} · ${car.fuel}", car = true)
+        selectedCar = car
+        rentalDates = BookingScreen.Dates()
+        select(if (rent) Page.RENT else Page.DETAILS)
     }
 
     private fun renderDestination(title: String, text: String, car: Boolean = false, addCar: Boolean = false) = with(ui) {
